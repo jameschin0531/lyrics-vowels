@@ -3,7 +3,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Lyrics → Vowels",
-  description: "Convert Chinese lyrics to their main vowel sounds.",
+  description:
+    "Convert Mandarin, Cantonese, or English lyrics to their main vowel sounds.",
 };
 
 export default function RootLayout({

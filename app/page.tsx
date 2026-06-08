@@ -1,95 +1,46 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { pinyin } from "pinyin-pro";
-
-const SAMPLE = `月亮代表我的心
-你问我爱你有多深
-我爱你有几分`;
-
-const TONE_TO_VOWEL: Record<string, string> = {
-  ā: "a", á: "a", ǎ: "a", à: "a",
-  ē: "e", é: "e", ě: "e", è: "e",
-  ī: "i", í: "i", ǐ: "i", ì: "i",
-  ō: "o", ó: "o", ǒ: "o", ò: "o",
-  ū: "u", ú: "u", ǔ: "u", ù: "u",
-  ǖ: "u", ǘ: "u", ǚ: "u", ǜ: "u", ü: "u",
-};
-
-// Standard Mandarin tone-mark placement rule, used as a fallback
-// for neutral (5th) tone where no diacritic exists.
-function fallbackVowel(syllable: string): string {
-  const s = syllable.toLowerCase();
-  if (s.includes("a")) return "a";
-  if (s.includes("e")) return "e";
-  if (s.includes("ou")) return "o";
-  const last = s.match(/[aeiouü]/g);
-  if (!last) return "";
-  return last[last.length - 1].replace("ü", "u");
-}
-
-function mainVowel(syllable: string): string {
-  for (const ch of syllable) {
-    const v = TONE_TO_VOWEL[ch];
-    if (v) return v;
-  }
-  return fallbackVowel(syllable);
-}
-
-const CJK = /\p{Script=Han}/u;
-
-type Token =
-  | { kind: "char"; char: string; syllable: string; vowel: string }
-  | { kind: "text"; text: string }
-  | { kind: "break" };
-
-function tokenize(input: string): Token[] {
-  const tokens: Token[] = [];
-  let buffer = "";
-
-  const flush = () => {
-    if (buffer) {
-      tokens.push({ kind: "text", text: buffer });
-      buffer = "";
-    }
-  };
-
-  for (const ch of input) {
-    if (ch === "\n") {
-      flush();
-      tokens.push({ kind: "break" });
-      continue;
-    }
-    if (CJK.test(ch)) {
-      flush();
-      const syllable = pinyin(ch, {
-        toneType: "symbol",
-        type: "string",
-        nonZh: "consecutive",
-      });
-      tokens.push({
-        kind: "char",
-        char: ch,
-        syllable,
-        vowel: mainVowel(syllable),
-      });
-    } else {
-      buffer += ch;
-    }
-  }
-  flush();
-  return tokens;
-}
+import { useEffect, useMemo, useState } from "react";
+import {
+  annotate,
+  ensureEnglishDict,
+  englishDictReady,
+  MODES,
+  modeMeta,
+  type Mode,
+} from "@/lib/vowels";
 
 export default function Page() {
-  const [text, setText] = useState(SAMPLE);
-  const tokens = useMemo(() => tokenize(text), [text]);
+  const [mode, setMode] = useState<Mode>("mandarin");
+  const [text, setText] = useState<string>(() => modeMeta("mandarin").sample);
+  // Bumped once the lazy English dictionary finishes loading, to recompute tokens.
+  const [dictVersion, setDictVersion] = useState(0);
+
+  const meta = modeMeta(mode);
+  const englishLoading = mode === "english" && !englishDictReady();
+
+  useEffect(() => {
+    if (mode !== "english") return;
+    let cancelled = false;
+    ensureEnglishDict().then(() => {
+      if (!cancelled) setDictVersion((v) => v + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode]);
+
+  const tokens = useMemo(
+    () => annotate(text, mode),
+    // dictVersion is intentional: re-annotate once the dictionary loads.
+    [text, mode, dictVersion],
+  );
 
   const vowelsOnly = useMemo(
     () =>
       tokens
         .map((t) => {
-          if (t.kind === "char") return t.vowel;
+          if (t.kind === "unit") return t.vowel;
           if (t.kind === "break") return "\n";
           return t.text;
         })
@@ -97,24 +48,58 @@ export default function Page() {
     [tokens],
   );
 
+  const switchMode = (next: Mode) => {
+    if (next === mode) return;
+    // Swap in the new mode's sample only when the user hasn't typed their own text.
+    const isUntouched = text.trim() === "" || MODES.some((m) => m.sample === text);
+    setMode(next);
+    if (isUntouched) setText(modeMeta(next).sample);
+  };
+
   const copyVowels = async () => {
     try {
       await navigator.clipboard.writeText(vowelsOnly);
     } catch {
-      /* ignore */
+      /* clipboard unavailable — ignore */
     }
   };
 
   return (
     <main className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-8 sm:py-12">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-          歌词 → 元音
-        </h1>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400">
-          Paste Chinese lyrics. Each character is shown with its main vowel
-          (the one carrying the tone) below — a / e / i / o / u.
-        </p>
+      <header className="space-y-3">
+        <div
+          role="tablist"
+          aria-label="Language mode"
+          className="inline-flex rounded-lg border border-neutral-300 p-0.5 dark:border-neutral-700"
+        >
+          {MODES.map((m) => {
+            const active = m.id === mode;
+            return (
+              <button
+                key={m.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => switchMode(m.id)}
+                className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+                  active
+                    ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
+                    : "text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800"
+                }`}
+              >
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            {meta.title}
+          </h1>
+          <p className="text-sm text-neutral-600 dark:text-neutral-400">
+            {meta.description}
+          </p>
+        </div>
       </header>
 
       <section className="space-y-2">
@@ -128,7 +113,7 @@ export default function Page() {
           id="lyrics"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="在此粘贴歌词…"
+          placeholder={meta.placeholder}
           rows={8}
           className="w-full resize-y rounded-lg border border-neutral-300 bg-white p-3 text-base shadow-sm focus:border-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:focus:border-neutral-200 dark:focus:ring-neutral-200"
         />
@@ -142,7 +127,7 @@ export default function Page() {
           </button>
           <button
             type="button"
-            onClick={() => setText(SAMPLE)}
+            onClick={() => setText(meta.sample)}
             className="rounded-md border border-neutral-300 px-3 py-1.5 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
           >
             Load sample
@@ -158,9 +143,16 @@ export default function Page() {
       </section>
 
       <section className="space-y-2">
-        <h2 className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
-          Result
-        </h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+            Result
+          </h2>
+          {englishLoading && (
+            <span className="text-xs text-neutral-500">
+              Loading pronunciation dictionary…
+            </span>
+          )}
+        </div>
         <div className="min-h-32 rounded-lg border border-neutral-200 bg-white p-4 leading-loose dark:border-neutral-800 dark:bg-neutral-900">
           {tokens.length === 0 ? (
             <p className="text-sm text-neutral-400">
@@ -174,10 +166,7 @@ export default function Page() {
                 }
                 if (t.kind === "text") {
                   return (
-                    <span
-                      key={i}
-                      className="whitespace-pre text-neutral-500"
-                    >
+                    <span key={i} className="whitespace-pre text-neutral-500">
                       {t.text}
                     </span>
                   );
@@ -186,12 +175,18 @@ export default function Page() {
                   <span
                     key={i}
                     className="mx-0.5 inline-flex flex-col items-center"
-                    title={t.syllable}
+                    title={t.pron || undefined}
                   >
                     <span className="text-xl leading-none sm:text-2xl">
-                      {t.char}
+                      {t.text}
                     </span>
-                    <span className="mt-1 text-xs font-mono uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                    <span
+                      className={`mt-1 text-xs font-mono uppercase tracking-wider ${
+                        t.approx
+                          ? "text-amber-600/70 underline decoration-dotted underline-offset-2 dark:text-amber-400/70"
+                          : "text-amber-600 dark:text-amber-400"
+                      }`}
+                    >
                       {t.vowel || "·"}
                     </span>
                   </span>
@@ -203,7 +198,7 @@ export default function Page() {
       </section>
 
       <footer className="pt-4 text-xs text-neutral-500">
-        Built with Next.js · pinyin-pro
+        Built with Next.js · pinyin-pro · to-jyutping · CMU dict
       </footer>
     </main>
   );
